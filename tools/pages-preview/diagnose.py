@@ -14,8 +14,8 @@ MARKER = 'roy-preview-38250609905-1'
 MAX_BODY = 1024 * 1024
 STAGES = (
     ('project', ''),
-    ('production_deployments', '/deployments?env=production&per_page=100&page=1'),
-    ('preview_deployments', '/deployments?env=preview&per_page=100&page=1'),
+    ('production_deployments', '/deployments?env=production&per_page=10&page=1'),
+    ('preview_deployments', '/deployments?env=preview&per_page=10&page=1'),
 )
 
 class Stop(Exception):
@@ -112,7 +112,7 @@ def run(account, token, opener=None):
             meta = trigger.get('metadata') if isinstance(trigger, dict) else None
             if isinstance(meta, dict) and meta.get('commit_message') == MARKER:
                 matches.append((d, meta))
-        state = 'not_seen_in_first_100'
+        state = 'not_seen_in_first_10'
         if len(matches) > 1:
             state = 'ambiguous'
         elif matches:

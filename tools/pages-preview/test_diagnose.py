@@ -49,6 +49,13 @@ class DiagnosticTests(unittest.TestCase):
         for request,(_,suffix) in zip(calls,d.STAGES):
             self.assertEqual(request.method,'GET');self.assertIsNone(request.data)
             self.assertEqual(request.full_url,f'https://api.cloudflare.com/client/v4/accounts/{ACCOUNT}/pages/projects/{d.PROJECT}'+suffix)
+    def test_list_queries_use_documented_example_size(self):
+        from urllib.parse import urlsplit, parse_qs
+        rc,rows,calls=self.execute([Response(project()),Response([]),Response([])])
+        self.assertEqual(rc,0);self.assertEqual(len(calls),3)
+        for request,env in zip(calls[1:],('production','preview')):
+            self.assertEqual(parse_qs(urlsplit(request.full_url).query),
+                             {'env':[env],'per_page':['10'],'page':['1']})
     def test_auth_error_numeric_code_only_no_retry(self):
         e=urllib.error.HTTPError('https://example.invalid',403,TOKEN,{},io.BytesIO(json.dumps({'errors':[{'code':10000,'message':TOKEN}]}).encode()))
         rc,rows,calls=self.execute([e])
@@ -68,7 +75,7 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual(rows[0]['http_status'],307);self.assertIsNone(rows[0]['json_valid'])
     def test_absence_not_claimed_beyond_first_page(self):
         rc,rows,calls=self.execute([Response(project()),Response([]),Response([])])
-        self.assertEqual(rows[-1]['marker_state'],'not_seen_in_first_100')
+        self.assertEqual(rows[-1]['marker_state'],'not_seen_in_first_10')
     def test_bad_metadata_never_printed(self):
         bad=deployment();bad['deployment_trigger']['metadata']['branch']=TOKEN
         rc,rows,_=self.execute([Response(project()),Response([]),Response([bad])])
