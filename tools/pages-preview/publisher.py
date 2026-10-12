@@ -19,6 +19,8 @@ PROJECT = 'roy-web-sales-previews'
 REPOSITORY = 'roy-baty-ai/roy-preview-publisher'
 BRANCHES = ('glass-green', 'reamertec')
 CONTENT_REF = 'refs/remotes/origin/preview-content'
+# Official Pages OpenAPI uses per_page=10 as its example; no maximum is specified.
+DEPLOYMENTS_PER_PAGE = 10
 SUFFIXES = {'.html', '.css', '.js', '.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg', '.ico', '.woff', '.woff2', '.txt'}
 MAX_FILE = 25 * 1024 * 1024
 MAX_TOTAL = 100 * 1024 * 1024
@@ -145,11 +147,11 @@ class API:
     def deployments(self, env):
         result = []
         for page in range(1, 101):
-            batch = self.get(f'/deployments?env={env}&per_page=100&page={page}')
+            batch = self.get(f'/deployments?env={env}&per_page={DEPLOYMENTS_PER_PAGE}&page={page}')
             require(isinstance(batch, list), 'API_SCHEMA_REJECTED')
             require(all(d['environment'] == env for d in batch), 'API_SCHEMA_REJECTED')
             result.extend(batch)
-            if len(batch) < 100:
+            if len(batch) < DEPLOYMENTS_PER_PAGE:
                 return result
         raise Refused('PAGINATION_LIMIT')
 

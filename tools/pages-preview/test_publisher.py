@@ -216,12 +216,32 @@ class PublisherTests(unittest.TestCase):
                 'https://api.cloudflare.com/client/v4/accounts/' + 'a' * 32 + '/pages/projects/' + p.PROJECT)
     def test_pagination_does_not_ignore_production(self):
         api = p.API('a' * 32, TOKEN)
-        rows = [{'id': str(i), 'environment': 'production'} for i in range(100)]
+        rows = [{'id': str(i), 'environment': 'production'} for i in range(10)]
         with patch.object(api, 'get', side_effect=[rows, [{'id': 'last', 'environment': 'production'}]]) as get:
-            self.assertEqual(len(api.deployments('production')), 101)
+            self.assertEqual(len(api.deployments('production')), 11)
             self.assertIn('page=2', get.call_args.args[0])
         with patch.object(api, 'get', return_value=[{'id': 'wrong', 'environment': 'preview'}]), self.assertRaises(p.Refused):
             api.deployments('production')
+    def test_pagination_documented_example_boundaries(self):
+        from urllib.parse import urlsplit, parse_qs
+        for count, expected_requests in ((0,1),(9,1),(10,2),(11,2),(20,3)):
+            api = p.API('a' * 32, TOKEN)
+            rows = [{'id': str(i), 'environment': 'production'} for i in range(count)]
+            def get(suffix):
+                query = parse_qs(urlsplit(suffix).query)
+                self.assertEqual(query['per_page'], ['10'])
+                self.assertEqual(query['env'], ['production'])
+                page = int(query['page'][0]); self.assertGreaterEqual(page,1)
+                return rows[(page-1)*10:page*10]
+            with self.subTest(count=count), patch.object(api,'get',side_effect=get) as mocked:
+                self.assertEqual(api.deployments('production'), rows)
+                self.assertEqual(mocked.call_count, expected_requests)
+    def test_pagination_bound_still_fails_closed(self):
+        api = p.API('a' * 32, TOKEN)
+        rows = [{'id': str(i), 'environment': 'production'} for i in range(10)]
+        with patch.object(api,'get',return_value=rows) as mocked, self.assertRaisesRegex(p.Refused,'PAGINATION_LIMIT'):
+            api.deployments('production')
+        self.assertEqual(mocked.call_count,100)
     def test_missing_fields_and_wrong_project(self):
         for field in ('production_branch', 'canonical_deployment', 'name', 'subdomain'):
             self.api = FakeAPI()
