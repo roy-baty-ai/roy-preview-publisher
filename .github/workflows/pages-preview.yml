@@ -1,0 +1,46 @@
+# Manual entry point installed with owner approval. Do not dispatch until protection, content and owner-secret gates pass.
+name: Publish approved Pages Preview
+on:
+  workflow_dispatch:
+    inputs:
+      preview_branch:
+        description: Approved Cloudflare Preview branch
+        required: true
+        type: choice
+        options: [glass-green, reamertec]
+      content_sha:
+        description: Reviewed full 40-character commit on preview-content
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: roy-web-sales-previews-publisher
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.repository == 'roy-baty-ai/roy-preview-publisher' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: cloudflare-preview-publish
+    env:
+      PREVIEW_BRANCH: ${{ inputs.preview_branch }}
+      CONTENT_SHA: ${{ inputs.content_sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24.19.0'
+      - name: Validate immutable static assets (no Cloudflare credentials)
+        run: python3 -I tools/pages-preview/publisher.py prepare
+      - name: Install locked trusted uploader (no lifecycle scripts or Cloudflare credentials)
+        run: npm ci --prefix tools/pages-preview --ignore-scripts --no-audit --no-fund
+      - name: Validate, upload, verify Preview and Production
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python3 -I tools/pages-preview/publisher.py publish
