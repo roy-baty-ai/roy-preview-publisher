@@ -48,12 +48,70 @@ class PublisherTests(unittest.TestCase):
         (self.stage / 'assets/_headers').write_bytes(b'/*\n  X-Robots-Tag: noindex, nofollow, noarchive\n')
         self.manifest()
         self.api = FakeAPI()
-    def manifest(self):
-        m = {'branch': 'glass-green', 'commit': SHA, 'files': {
+    def manifest(self, branch='glass-green'):
+        m = {'branch': branch, 'commit': SHA, 'files': {
             f.name: p.hashlib.sha256(f.read_bytes()).hexdigest() for f in (self.stage / 'assets').iterdir()}}
         (self.stage / 'manifest.json').write_text(json.dumps(m))
     def publish(self, branch='glass-green', deploy=None):
         return p.publish(self.api, deploy or self.api.deploy, self.stage, branch, SHA, MARKER, self.root / 'lock', pause=lambda _: None, probe=lambda *_: True)
+    def test_window_door_preview_success_preserves_other_preview(self):
+        self.manifest('window-door-demo')
+        self.api.deploy('reamertec', 'b' * 40, 'roy-preview-100-1')
+        self.api.preview[0]['id'] = 'existing-other-preview'
+        existing = copy.deepcopy(self.api.preview[0])
+        visited = []
+        result = p.publish(self.api, self.api.deploy, self.stage, 'window-door-demo', SHA, MARKER,
+                           self.root / 'lock', pause=lambda _: None,
+                           probe=lambda url, expected: visited.append(url) or True)
+        self.assertEqual(result['environment'], 'preview')
+        self.assertEqual(result['branch'], 'window-door-demo')
+        self.assertEqual(result['alias_url'], 'https://window-door-demo.' + p.PROJECT + '.pages.dev')
+        self.assertTrue(result['production_unchanged'])
+        self.assertEqual(visited, [result['url'], result['alias_url']])
+        self.assertEqual(self.api.preview[0], existing)
+        self.assertEqual(len(self.api.preview), 2)
+
+    def test_window_door_production_or_wrong_project_refused_before_upload(self):
+        self.manifest('window-door-demo')
+        for field, value, code in [('production_branch', 'window-door-demo', 'PRODUCTION_REJECTED'),
+                                   ('production_branch', 'WINDOW-DOOR-DEMO', 'PRODUCTION_REJECTED'),
+                                   ('name', 'other-project', 'PROJECT_REJECTED')]:
+            self.api = FakeAPI()
+            self.api.project[field] = value
+            with self.subTest(field=field, value=value), self.assertRaisesRegex(p.Refused, code):
+                self.publish('window-door-demo')
+            self.assertEqual(self.api.preview, [])
+
+    def test_window_door_wrong_alias_refused(self):
+        self.manifest('window-door-demo')
+        def deploy(*args):
+            self.api.deploy(*args)
+            self.api.preview[-1]['aliases'] = ['https://reamertec.' + p.PROJECT + '.pages.dev']
+        with self.assertRaisesRegex(p.Refused, 'ALIAS_MISSING_OR_WRONG'):
+            self.publish('window-door-demo', deploy=deploy)
+
+    def test_window_door_variants_remain_unapproved(self):
+        for branch in ('WINDOW-DOOR-DEMO', 'window-door-demo-2', '../window-door-demo',
+                       'window-door-demo;echo secret', 'window-door-demo ', 'main', 'production'):
+            with self.subTest(branch=branch), self.assertRaisesRegex(p.Refused, 'BRANCH_REJECTED'):
+                self.publish(branch)
+        self.assertEqual(self.api.preview, [])
+
+    def test_window_door_cli_context_rejected_before_secret_use(self):
+        env = {'PREVIEW_BRANCH': 'window-door-demo', 'CONTENT_SHA': SHA,
+               'GITHUB_WORKSPACE': str(self.root), 'RUNNER_TEMP': str(self.root),
+               'GITHUB_REPOSITORY': p.REPOSITORY, 'GITHUB_REF': 'refs/heads/main',
+               'GITHUB_EVENT_NAME': 'workflow_dispatch'}
+        for key, value in [('GITHUB_REF', 'refs/heads/proposal/window-door-demo-publisher'),
+                           ('GITHUB_REF', 'refs/tags/main'), ('GITHUB_REPOSITORY', 'other/repo'),
+                           ('GITHUB_EVENT_NAME', 'push'), ('GITHUB_EVENT_NAME', 'pull_request')]:
+            err = io.StringIO()
+            with self.subTest(key=key, value=value), patch.dict(os.environ, dict(env, **{key: value}), clear=True), \
+                 patch('sys.argv', ['publisher', 'publish']), patch('sys.stderr', err), patch.object(p, 'API') as api:
+                self.assertEqual(p.main(), 1)
+                self.assertEqual(err.getvalue().strip(), 'STOP: CONTEXT_REJECTED')
+                api.assert_not_called()
+
     def test_success_no_production(self):
         self.assertTrue(self.publish()['production_unchanged'])
     def test_unexpected_existing_production(self):
@@ -297,6 +355,41 @@ class PublisherTests(unittest.TestCase):
             self.assertIn('--branch', args[0])
 
 class GitArtifactTests(unittest.TestCase):
+    def test_window_door_extracts_only_selected_static_assets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            def git(*args):
+                return subprocess.check_output(['git', '-C', tmp, *args], stderr=subprocess.DEVNULL).decode().strip()
+            git('init')
+            git('config', 'user.email', 'fixture@example.invalid')
+            git('config', 'user.name', 'Fixture')
+            assets = root / 'preview-assets/window-door-demo'
+            (assets / 'assets').mkdir(parents=True)
+            (assets / 'index.html').write_text('<html>Fictional demo</html>')
+            (assets / 'assets/window.png').write_bytes(b'local-image-fixture')
+            other = root / 'preview-assets/reamertec'
+            other.mkdir(parents=True)
+            (other / 'index.html').write_text('Do not include other preview')
+            (root / 'verification.txt').write_text('Do not publish internal verification')
+            git('add', '.')
+            git('commit', '-m', 'fixture')
+            sha = git('rev-parse', 'HEAD')
+            git('update-ref', p.CONTENT_REF, sha)
+            stage = root / 'stage'
+            manifest = p.prepare(root, stage, 'window-door-demo', sha)
+            p.verify_stage(stage, 'window-door-demo', sha)
+            self.assertEqual(set(manifest['files']), {'index.html', 'assets/window.png', '_headers'})
+            self.assertEqual((stage / 'assets/index.html').read_bytes(), (assets / 'index.html').read_bytes())
+            (assets / '_worker.js').write_text('must be rejected')
+            git('add', 'preview-assets')
+            git('commit', '-m', 'forbidden')
+            bad = git('rev-parse', 'HEAD')
+            with self.assertRaises(p.Refused):
+                p.prepare(root, root / 'unreviewed', 'window-door-demo', bad)
+            git('update-ref', p.CONTENT_REF, bad)
+            with self.assertRaisesRegex(p.Refused, 'PATH_REJECTED'):
+                p.prepare(root, root / 'forbidden', 'window-door-demo', bad)
+
     def test_real_git_static_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -399,6 +492,25 @@ class ProcessSupervisorTests(unittest.TestCase):
         self.assertEqual(p.child_pids(), [])
 
 class WorkflowTests(unittest.TestCase):
+    def test_installed_workflow_choices_and_guards_match_template(self):
+        root = Path(__file__).resolve().parents[2]
+        installed = (root / '.github/workflows/pages-preview.yml').read_text()
+        template = (root / 'tools/pages-preview/workflow.yml.example').read_text()
+        # Ignore introductory comments; the executable workflow must stay identical.
+        self.assertEqual(installed[installed.index('name:'):], template[template.index('name:'):])
+        options = p.re.search(r'options: \[(.*?)\]', installed).group(1).split(', ')
+        self.assertEqual(options, ['glass-green', 'reamertec', 'window-door-demo'])
+        self.assertEqual(tuple(options), p.BRANCHES)
+        self.assertIn("github.ref == 'refs/heads/main'", installed)
+        self.assertIn("github.repository == 'roy-baty-ai/roy-preview-publisher'", installed)
+        self.assertIn("github.event_name == 'workflow_dispatch'", installed)
+        self.assertIn('environment: cloudflare-preview-publish', installed)
+        self.assertIn('permissions:\n  contents: read', installed)
+        self.assertNotIn('push:', installed)
+        self.assertNotIn('pull_request:', installed)
+        self.assertEqual(installed.count('secrets.CLOUDFLARE_API_TOKEN'), 1)
+        self.assertNotIn('secrets.', installed.split('- name: Validate, upload')[0])
+
     def test_inert_and_secret_scope(self):
         # Optional PyYAML parser check is performed separately in local verification.
         root = Path(__file__).parent

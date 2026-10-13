@@ -17,7 +17,7 @@ import urllib.request
 
 PROJECT = 'roy-web-sales-previews'
 REPOSITORY = 'roy-baty-ai/roy-preview-publisher'
-BRANCHES = ('glass-green', 'reamertec')
+BRANCHES = ('glass-green', 'reamertec', 'window-door-demo')
 CONTENT_REF = 'refs/remotes/origin/preview-content'
 # Official Pages OpenAPI uses per_page=10 as its example; no maximum is specified.
 DEPLOYMENTS_PER_PAGE = 10

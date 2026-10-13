@@ -7,7 +7,7 @@ on:
         description: Approved Cloudflare Preview branch
         required: true
         type: choice
-        options: [glass-green, reamertec]
+        options: [glass-green, reamertec, window-door-demo]
       content_sha:
         description: Reviewed full 40-character commit on preview-content
         required: true

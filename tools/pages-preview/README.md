@@ -2,7 +2,7 @@
 
 専用 public repository `roy-baty-ai/roy-preview-publisher` に置く公開処理です。
 既存 Cloudflare Pages Direct Upload project `roy-web-sales-previews` の
-`glass-green` / `reamertec` のみを対象とし、native Git 接続や Workers へ移行しません。
+`glass-green` / `reamertec` / `window-door-demo` のみを対象とし、native Git 接続や Workers へ移行しません。
 `workflow.yml.example` は非稼働の提案です。token 設定・保護設定・Actions 実行・deploy は別途有効化するまで行いません。
 
 ## 信頼境界
@@ -19,7 +19,8 @@
 ## 公開コンテンツの受け渡し
 
 同じ専用public repoの固定 `preview-content` branch に、公開許可済みの完成した静的ファイルだけをコミットします。
-固定パスは `preview-assets/glass-green/` と `preview-assets/reamertec/`、各直下に `index.html`。
+固定パスは `preview-assets/glass-green/`、`preview-assets/reamertec/`、`preview-assets/window-door-demo/`、各直下に `index.html`。
+`window-door-demo` は架空の窓・ドア工事店の共通見本です。完成したHTMLと生成画像3枚だけを置き、検査資料や元の個社情報は含めません。
 **GitHub上でも誰でも読める内容だけ**を入れます。private repoの履歴、台帳、メール、内部方針、個人記録は持ち込みません。
 private repoを読むPATやcross-repository credentialは不要です。
 
