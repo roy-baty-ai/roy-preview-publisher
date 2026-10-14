@@ -1,0 +1,1 @@
+(()=>{'use strict';const output=document.getElementById('day-example');const days=[...document.querySelectorAll('input[name="day"]')];function update(){const selected=days.find(day=>day.checked);output.textContent=selected.value+'曜日の体験レッスンについて、参加方法と会場、用意する道具を確認したいです。';}days.forEach(day=>day.addEventListener('change',update));update();})();
