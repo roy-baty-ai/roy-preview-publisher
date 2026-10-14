@@ -10,12 +10,16 @@ import threading
 import time
 import tempfile
 import unittest
+import urllib.error
 from unittest.mock import patch
 import publisher as p
 
 SHA = 'a' * 40
 TOKEN = 'FAKE_SECRET_MUST_NOT_APPEAR'
 MARKER = 'roy-preview-123-1'
+
+def probe_result(match=True, role='deployment'):
+    return p.probe_result(role, 'verified' if match else 'content_mismatch', 200, hash_match=match)
 
 class FakeAPI:
     def __init__(self, branch='reserved-prod'):
@@ -53,7 +57,7 @@ class PublisherTests(unittest.TestCase):
             f.name: p.hashlib.sha256(f.read_bytes()).hexdigest() for f in (self.stage / 'assets').iterdir()}}
         (self.stage / 'manifest.json').write_text(json.dumps(m))
     def publish(self, branch='glass-green', deploy=None):
-        return p.publish(self.api, deploy or self.api.deploy, self.stage, branch, SHA, MARKER, self.root / 'lock', pause=lambda _: None, probe=lambda *_: True)
+        return p.publish(self.api, deploy or self.api.deploy, self.stage, branch, SHA, MARKER, self.root / 'lock', pause=lambda _: None, probe=lambda url, expected, role: probe_result(role=role))
     def test_window_door_preview_success_preserves_other_preview(self):
         self.manifest('window-door-demo')
         self.api.deploy('reamertec', 'b' * 40, 'roy-preview-100-1')
@@ -62,7 +66,7 @@ class PublisherTests(unittest.TestCase):
         visited = []
         result = p.publish(self.api, self.api.deploy, self.stage, 'window-door-demo', SHA, MARKER,
                            self.root / 'lock', pause=lambda _: None,
-                           probe=lambda url, expected: visited.append(url) or True)
+                           probe=lambda url, expected, role: visited.append(url) or probe_result(role=role))
         self.assertEqual(result['environment'], 'preview')
         self.assertEqual(result['branch'], 'window-door-demo')
         self.assertEqual(result['alias_url'], 'https://window-door-demo.' + p.PROJECT + '.pages.dev')
@@ -124,7 +128,7 @@ class PublisherTests(unittest.TestCase):
     def test_public_probe_must_succeed(self):
         with self.assertRaisesRegex(p.Refused, 'DEPLOYMENT_UNVERIFIED'):
             p.publish(self.api, self.api.deploy, self.stage, 'glass-green', SHA, MARKER,
-                      self.root / 'lock', pause=lambda _: None, probe=lambda *_: False)
+                      self.root / 'lock', pause=lambda _: None, probe=lambda url, expected, role: probe_result(False, role))
     def test_alias_missing_wrong_or_old(self):
         for aliases in (None, [], ['https://reamertec.' + p.PROJECT + '.pages.dev'],
                         ['https://glass-green.' + p.PROJECT + '.pages.dev.evil.example']):
@@ -137,17 +141,17 @@ class PublisherTests(unittest.TestCase):
         # Immutable URL serves current bytes, while the public alias serves old/wrong bytes.
         for wrong in (b'previous approved version', b'wrong content'):
             self.api = FakeAPI()
-            def probe(url, expected):
+            def probe(url, expected, role):
                 data = wrong if 'glass-green.' in url else (self.stage / 'assets/index.html').read_bytes()
-                return p.hashlib.sha256(data).hexdigest() == expected
+                return probe_result(p.hashlib.sha256(data).hexdigest() == expected, role)
             with self.assertRaisesRegex(p.Refused, 'DEPLOYMENT_UNVERIFIED'):
                 p.publish(self.api, self.api.deploy, self.stage, 'glass-green', SHA, MARKER,
                           self.root / 'lock', pause=lambda _: None, probe=probe)
     def test_both_public_urls_verified(self):
         visited = []
-        def probe(url, expected):
+        def probe(url, expected, role):
             visited.append(url)
-            return True
+            return probe_result(role=role)
         result = p.publish(self.api, self.api.deploy, self.stage, 'glass-green', SHA, MARKER,
                            self.root / 'lock', pause=lambda _: None, probe=probe)
         self.assertEqual(visited, [result['url'], result['alias_url']])
@@ -340,9 +344,82 @@ class PublisherTests(unittest.TestCase):
             def __exit__(self, *_): pass
             def read(self, *_): return b'fixture'
         with patch('urllib.request.OpenerDirector.open', return_value=Response()) as opened:
-            self.assertTrue(p.public_probe('https://1234abcd.' + p.PROJECT + '.pages.dev', p.hashlib.sha256(b'fixture').hexdigest()))
+            self.assertEqual(p.public_probe('https://1234abcd.' + p.PROJECT + '.pages.dev', p.hashlib.sha256(b'fixture').hexdigest()), probe_result())
             self.assertNotIn('Authorization', dict(opened.call_args.args[0].header_items()))
-            self.assertFalse(p.public_probe('https://1234abcd.' + p.PROJECT + '.pages.dev', 'wrong'))
+            self.assertEqual(p.public_probe('https://1234abcd.' + p.PROJECT + '.pages.dev', 'wrong'), probe_result(False))
+    def test_probe_errors_safe_and_single_request(self):
+        cases = [
+            (urllib.error.HTTPError('https://bad.invalid', 403, TOKEN, {},
+                io.BytesIO(('error code: 1010 ' + TOKEN).encode())), 'access_denied', 403, [1010]),
+            (urllib.error.HTTPError('https://bad.invalid', 403, TOKEN, {},
+                io.BytesIO(('error code: 9999 ' + TOKEN).encode())), 'access_denied', 403, []),
+            (urllib.error.HTTPError('https://bad.invalid', 302, TOKEN, {}, io.BytesIO(TOKEN.encode())),
+                'redirect_rejected', 302, []),
+            (p.RedirectRejected(307), 'redirect_rejected', 307, []),
+            (urllib.error.URLError(TOKEN), 'network_failure', None, []),
+            (urllib.error.HTTPError('https://bad.invalid', 503, TOKEN, {}, io.BytesIO(TOKEN.encode())),
+                'http_error', 503, []),
+        ]
+        for error, state, status, codes in cases:
+            with self.subTest(state=state, status=status), patch('urllib.request.OpenerDirector.open', side_effect=error) as opened:
+                result = p.public_probe('https://1234abcd.' + p.PROJECT + '.pages.dev', 'unused', 'alias')
+                self.assertEqual(result, p.probe_result('alias', state, status, codes))
+                opened.assert_called_once()
+                self.assertNotIn(TOKEN, json.dumps(result))
+                self.assertNotIn('invalid', json.dumps(result))
+        response = unittest.mock.Mock()
+        with self.assertRaises(p.RedirectRejected) as error:
+            p.NoRedirect().redirect_request(None, response, 302, TOKEN, {}, 'https://bad.invalid')
+        self.assertEqual(error.exception.status, 302)
+        response.close.assert_called_once()
+
+    def test_denial_and_redirect_do_not_retry_and_always_postcheck(self):
+        for role in ('deployment', 'alias'):
+            for state, code in (('access_denied', 'PUBLIC_ACCESS_DENIED'), ('redirect_rejected', 'PUBLIC_REDIRECT_REJECTED')):
+                self.api = FakeAPI()
+                visited, pauses = [], []
+                def probe(url, expected, current_role):
+                    visited.append(current_role)
+                    return p.probe_result(current_role, state, 403, [1010]) if role == current_role else probe_result(role=current_role)
+                with self.subTest(role=role, state=state), self.assertRaisesRegex(p.Refused, code):
+                    p.publish(self.api, self.api.deploy, self.stage, 'glass-green', SHA, MARKER,
+                              self.root / 'lock', pause=pauses.append, probe=probe)
+                self.assertEqual(visited, ['deployment'] if role == 'deployment' else ['deployment', 'alias'])
+                self.assertEqual(pauses, [])
+                self.assertEqual(self.api.calls, 4)
+
+    def test_production_change_overrides_denial_and_probe_exception(self):
+        for raises in (False, True):
+            self.api = FakeAPI()
+            def probe(*args):
+                self.api.project['production_branch'] = 'changed'
+                if raises:
+                    raise RuntimeError(TOKEN)
+                return p.probe_result('deployment', 'access_denied', 403, [1010])
+            with self.assertRaisesRegex(p.Refused, 'PRODUCTION_CHANGED_AFTER_UPLOAD'):
+                p.publish(self.api, self.api.deploy, self.stage, 'glass-green', SHA, MARKER,
+                          self.root / 'lock', pause=lambda _: None, probe=probe)
+            self.assertEqual(self.api.calls, 4)
+
+    def test_not_found_and_pending_distinct_with_final_postcheck(self):
+        for pending, code in ((False, 'DEPLOYMENT_NOT_FOUND'), (True, 'DEPLOYMENT_PENDING')):
+            self.api = FakeAPI()
+            def deploy(*args):
+                if pending:
+                    self.api.deploy(*args)
+                    self.api.preview[0]['latest_stage']['status'] = 'active'
+            with self.assertRaisesRegex(p.Refused, code):
+                self.publish(deploy=deploy)
+            self.assertEqual(self.api.calls, 4)
+
+    def test_metadata_refusal_runs_final_postcheck(self):
+        def deploy(*args):
+            self.api.deploy(*args)
+            self.api.preview[0]['deployment_trigger']['metadata']['commit_hash'] = 'bad'
+        with self.assertRaisesRegex(p.Refused, 'DEPLOYMENT_MISMATCH'):
+            self.publish(deploy=deploy)
+        self.assertEqual(self.api.calls, 4)
+
     def test_wrangler_has_no_shell_and_minimal_env(self):
         with patch.object(p, 'run_uploader') as run, patch.dict(os.environ, {'RUNNER_TRACKING_ID': 'fixture-tracker'}):
             p.wrangler_upload(self.stage, self.root, 'a' * 32, TOKEN)('glass-green', SHA, MARKER)

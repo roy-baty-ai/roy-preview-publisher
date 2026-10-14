@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 
 PROJECT = 'roy-web-sales-previews'
@@ -121,9 +122,16 @@ def verify_stage(stage, branch, sha):
     require((stage / 'assets' / '_headers').read_bytes() == b'/*\n  X-Robots-Tag: noindex, nofollow, noarchive\n', 'HEADERS_CHANGED')
     return hashlib.sha256(json.dumps(m, sort_keys=True).encode()).hexdigest()
 
+class RedirectRejected(Refused):
+    def __init__(self, status):
+        super().__init__('REDIRECT_REJECTED')
+        self.status = status
+
 class NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args, **kwargs):
-        raise Refused('REDIRECT_REJECTED')
+    def redirect_request(self, request, response, code, message, headers, new_url):
+        if response is not None:
+            response.close()
+        raise RedirectRejected(code)
 
 class API:
     def __init__(self, account, token):
@@ -192,15 +200,44 @@ def exclusive(lock):
 def valid_url(url):
     return isinstance(url, str) and re.fullmatch(r'https://[0-9a-f]{8,32}\.roy-web-sales-previews\.pages\.dev', url)
 
-def public_probe(url, expected):
-    # No API token, cookies, proxy auth, redirects, or site JavaScript execution.
+def probe_result(role, state, status=None, codes=None, hash_match=None):
+    require(role in ('deployment', 'alias'), 'PROBE_ROLE_REJECTED')
+    return {'role': role, 'state': state, 'http_status': status,
+            'cloudflare_error_codes': codes or [], 'hash_match': hash_match}
+
+def public_probe(url, expected, role='deployment'):
+    # Same request headers as before. No access-control bypass or credentials.
+    require(role in ('deployment', 'alias'), 'PROBE_ROLE_REJECTED')
+    status = None
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect)
         request = urllib.request.Request(url + '/', headers={'Accept-Encoding': 'identity'})
         with opener.open(request, timeout=30) as response:
-            return response.status == 200 and hashlib.sha256(response.read(MAX_FILE + 1)).hexdigest() == expected
+            status = response.status
+            if status != 200:
+                return probe_result(role, 'access_denied' if status in (401, 403) else
+                                    'redirect_rejected' if 300 <= status < 400 else 'http_error', status)
+            raw = response.read(MAX_FILE + 1)
+            match = len(raw) <= MAX_FILE and hashlib.sha256(raw).hexdigest() == expected
+            return probe_result(role, 'verified' if match else 'content_mismatch', status, hash_match=match)
+    except RedirectRejected as error:
+        return probe_result(role, 'redirect_rejected', error.status)
+    except urllib.error.HTTPError as error:
+        status, codes = error.code, []
+        try:
+            # Recognize only the known denial code; never emit arbitrary body text.
+            if status == 403:
+                raw = error.read(64 * 1024)
+                if re.search(rb'(?i)\b(?:error(?:\s+code)?\s*:?\s*|code["\']?\s*:\s*)1010\b', raw):
+                    codes = [1010]
+        except Exception:
+            pass
+        finally:
+            error.close()
+        return probe_result(role, 'access_denied' if status in (401, 403) else
+                            'redirect_rejected' if 300 <= status < 400 else 'http_error', status, codes)
     except Exception:
-        return False
+        return probe_result(role, 'network_failure', status)
 
 def publish(api, deploy, stage, branch, sha, marker, lock, pause=time.sleep, probe=public_probe):
     branch_ok(branch)
@@ -221,34 +258,49 @@ def publish(api, deploy, stage, branch, sha, marker, lock, pause=time.sleep, pro
         # A failed CLI may have uploaded. Always attempt the Production post-check.
         require(snapshot(api, branch) == before, 'PRODUCTION_CHANGED_AFTER_UPLOAD')
         require(failure is None, failure)
-        for _ in range(12):
-            matches = []
-            for d in api.deployments('preview'):
-                meta = d.get('deployment_trigger', {}).get('metadata', {})
-                if d['id'] not in old_ids and meta.get('commit_message') == marker:
-                    matches.append(d)
-            require(len(matches) <= 1, 'AMBIGUOUS_DEPLOYMENT')
-            if matches:
-                d = matches[0]
-                meta = d['deployment_trigger']['metadata']
-                require(d['environment'] == 'preview' and meta.get('branch') == branch and meta.get('commit_hash') == sha, 'DEPLOYMENT_MISMATCH')
-                status = d.get('latest_stage', {})
-                require(status.get('status') not in ('failure', 'canceled'), 'DEPLOYMENT_FAILED')
-                if status.get('name') == 'deploy' and status.get('status') == 'success':
-                    require(valid_url(d.get('url')), 'URL_REJECTED')
-                    alias = f'https://{branch}.{PROJECT}.pages.dev'
-                    aliases = d.get('aliases')
-                    require(isinstance(aliases, list) and alias in aliases, 'ALIAS_MISSING_OR_WRONG')
-                    expected = hashlib.sha256((stage / 'assets/index.html').read_bytes()).hexdigest()
-                    if not probe(d['url'], expected) or not probe(alias, expected):
-                        pause(5)
-                        continue
-                    require(snapshot(api, branch) == before, 'PRODUCTION_CHANGED_AFTER_UPLOAD')
-                    return {'project': PROJECT, 'branch': branch, 'commit': sha, 'environment': 'preview',
-                            'url': d['url'], 'alias_url': alias, 'manifest_sha256': digest, 'production_unchanged': True}
-            pause(5)
-        require(snapshot(api, branch) == before, 'PRODUCTION_CHANGED_AFTER_UPLOAD')
-        raise Refused('DEPLOYMENT_UNVERIFIED')
+        try:
+            state = 'not_found'
+            for _ in range(12):
+                matches = []
+                for d in api.deployments('preview'):
+                    meta = d.get('deployment_trigger', {}).get('metadata', {})
+                    if d['id'] not in old_ids and meta.get('commit_message') == marker:
+                        matches.append(d)
+                require(len(matches) <= 1, 'AMBIGUOUS_DEPLOYMENT')
+                state = 'not_found'
+                if matches:
+                    d = matches[0]
+                    meta = d['deployment_trigger']['metadata']
+                    require(d['environment'] == 'preview' and meta.get('branch') == branch and meta.get('commit_hash') == sha, 'DEPLOYMENT_MISMATCH')
+                    status = d.get('latest_stage', {})
+                    require(status.get('status') not in ('failure', 'canceled'), 'DEPLOYMENT_FAILED')
+                    state = 'pending'
+                    if status.get('name') == 'deploy' and status.get('status') == 'success':
+                        require(valid_url(d.get('url')), 'URL_REJECTED')
+                        alias = f'https://{branch}.{PROJECT}.pages.dev'
+                        aliases = d.get('aliases')
+                        require(isinstance(aliases, list) and alias in aliases, 'ALIAS_MISSING_OR_WRONG')
+                        expected = hashlib.sha256((stage / 'assets/index.html').read_bytes()).hexdigest()
+                        state = 'unverified'
+                        verified = True
+                        for role, url in (('deployment', d['url']), ('alias', alias)):
+                            result = probe(url, expected, role)
+                            print(json.dumps(result, sort_keys=True))
+                            # Never retry access denials or attempt the other URL as a bypass.
+                            require(result['state'] != 'access_denied', 'PUBLIC_ACCESS_DENIED')
+                            require(result['state'] != 'redirect_rejected', 'PUBLIC_REDIRECT_REJECTED')
+                            verified = verified and (result['state'] == 'verified' and
+                                result['http_status'] == 200 and result['hash_match'] is True)
+                        if verified:
+                            return {'project': PROJECT, 'branch': branch, 'commit': sha, 'environment': 'preview',
+                                    'url': d['url'], 'alias_url': alias, 'manifest_sha256': digest, 'production_unchanged': True}
+                pause(5)
+            raise Refused({'not_found': 'DEPLOYMENT_NOT_FOUND', 'pending': 'DEPLOYMENT_PENDING',
+                           'unverified': 'DEPLOYMENT_UNVERIFIED'}[state])
+        finally:
+            # Includes access denial, malformed metadata, pending, and probe/API errors.
+            # A changed/unknown Production state must override every verification outcome.
+            require(snapshot(api, branch) == before, 'PRODUCTION_CHANGED_AFTER_UPLOAD')
 
 def child_pids():
     # Single-threaded Linux uploader owns all children while this supervisor runs.
