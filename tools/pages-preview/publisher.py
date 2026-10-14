@@ -280,6 +280,13 @@ def publish(api, deploy, stage, branch, sha, marker, lock, pause=time.sleep, pro
                         alias = f'https://{branch}.{PROJECT}.pages.dev'
                         aliases = d.get('aliases')
                         require(isinstance(aliases, list) and alias in aliases, 'ALIAS_MISSING_OR_WRONG')
+                        # Preserve the validated destination even if public access is denied.
+                        # This is API evidence only; the final Production check is still pending.
+                        print(json.dumps({'stage': 'deployment_api_verified', 'project': PROJECT,
+                                          'branch': branch, 'commit': sha, 'marker': marker,
+                                          'environment': 'preview', 'url': d['url'], 'alias_url': alias,
+                                          'deployment_api_verified': True, 'public_content_verified': False,
+                                          'production_final_check': 'pending'}, sort_keys=True), flush=True)
                         expected = hashlib.sha256((stage / 'assets/index.html').read_bytes()).hexdigest()
                         state = 'unverified'
                         verified = True

@@ -388,6 +388,74 @@ class PublisherTests(unittest.TestCase):
                 self.assertEqual(pauses, [])
                 self.assertEqual(self.api.calls, 4)
 
+    def test_api_url_record_is_flushed_before_denied_probe_without_secrets(self):
+        class FlushedOutput(io.StringIO):
+            flushes = 0
+            def flush(self):
+                self.flushes += 1
+                super().flush()
+        out, visited, pauses = FlushedOutput(), [], []
+        def deploy(*args):
+            self.api.deploy(*args)
+            self.api.preview[0]['private_response_field'] = TOKEN
+            self.api.preview[0]['deployment_trigger']['metadata']['private_field'] = TOKEN
+        def probe(url, expected, role):
+            visited.append(role)
+            record = json.loads(out.getvalue())
+            self.assertGreater(out.flushes, 0)
+            self.assertEqual(record, {
+                'stage': 'deployment_api_verified', 'project': p.PROJECT,
+                'branch': 'glass-green', 'commit': SHA, 'marker': MARKER,
+                'environment': 'preview', 'url': url,
+                'alias_url': 'https://glass-green.' + p.PROJECT + '.pages.dev',
+                'deployment_api_verified': True, 'public_content_verified': False,
+                'production_final_check': 'pending'})
+            return p.probe_result(role, 'access_denied', 403, [1010])
+        with patch('sys.stdout', out), self.assertRaisesRegex(p.Refused, '^PUBLIC_ACCESS_DENIED$'):
+            p.publish(self.api, deploy, self.stage, 'glass-green', SHA, MARKER,
+                      self.root / 'lock', pause=pauses.append, probe=probe)
+        self.assertEqual(visited, ['deployment'])
+        self.assertEqual(pauses, [])
+        self.assertEqual(self.api.calls, 4)
+        self.assertNotIn(TOKEN, out.getvalue())
+        self.assertFalse(json.loads(out.getvalue().splitlines()[0])['public_content_verified'])
+
+    def test_api_url_record_not_emitted_before_deployment_validation(self):
+        for field, value in (('branch', 'reamertec'), ('commit_hash', 'b' * 40),
+                             ('commit_message', 'other'), ('environment', 'production'),
+                             ('status', 'active'), ('status', 'failure'),
+                             ('url', 'https://evil.invalid/' + TOKEN), ('aliases', [])):
+            self.api = FakeAPI()
+            out = io.StringIO()
+            def deploy(*args):
+                self.api.deploy(*args)
+                item = self.api.preview[0]
+                if field in ('branch', 'commit_hash', 'commit_message'):
+                    item['deployment_trigger']['metadata'][field] = value
+                elif field == 'status':
+                    item['latest_stage'][field] = value
+                else:
+                    item[field] = value
+            with self.subTest(field=field, value=value), patch('sys.stdout', out), self.assertRaises(p.Refused):
+                self.publish(deploy=deploy)
+            self.assertEqual(out.getvalue(), '')
+            self.assertEqual(self.api.calls, 4)
+
+    def test_api_record_does_not_claim_final_production_check_on_change(self):
+        out = io.StringIO()
+        def probe(url, expected, role):
+            self.api.project['production_branch'] = 'changed'
+            return probe_result(role=role)
+        with patch('sys.stdout', out), self.assertRaisesRegex(p.Refused, 'PRODUCTION_CHANGED_AFTER_UPLOAD'):
+            p.publish(self.api, self.api.deploy, self.stage, 'glass-green', SHA, MARKER,
+                      self.root / 'lock', pause=lambda _: None, probe=probe)
+        record = json.loads(out.getvalue().splitlines()[0])
+        self.assertTrue(record['deployment_api_verified'])
+        self.assertFalse(record['public_content_verified'])
+        self.assertEqual(record['production_final_check'], 'pending')
+        self.assertNotIn('production_unchanged', record)
+        self.assertEqual(self.api.calls, 4)
+
     def test_production_change_overrides_denial_and_probe_exception(self):
         for raises in (False, True):
             self.api = FakeAPI()
