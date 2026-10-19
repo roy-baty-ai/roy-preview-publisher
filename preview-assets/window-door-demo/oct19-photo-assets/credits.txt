@@ -1,0 +1,24 @@
+sewing.webp: AI生成イメージ / Roy Lab
+incense.webp: AI生成イメージ / Roy Lab
+fitness.webp: AI生成イメージ / Roy Lab
+bellydance.webp: AI生成イメージ / Roy Lab
+equipment.webp: AI生成イメージ / Roy Lab
+tools.webp: AI生成イメージ / Roy Lab
+fabric.webp: AI生成イメージ / Roy Lab
+pattern.webp: AI生成イメージ / Roy Lab
+aromatics.webp: AI生成イメージ / Roy Lab
+incense-tea.webp: AI生成イメージ / Roy Lab
+studio.webp: AI生成イメージ / Roy Lab
+practice-kit.webp: AI生成イメージ / Roy Lab
+online-study.webp: AI生成イメージ / Roy Lab
+cafe.webp: AI生成イメージ / Roy Lab（親タスク作成）
+ballet.webp: AI生成イメージ / Roy Lab（親タスク作成）
+aircon.webp: AI生成イメージ / Roy Lab（既存承認済み素材）
+english-desk.webp: AI生成イメージ / Roy Lab（既存承認済み素材）
+slippers.webp: Angela Petrosyan / Pexels, Photo 31241090
+yoga.webp: KoolShooters / Pexels, Photo 6246682
+room.webp: Pixabay / Pexels, Photo 210547
+chairs.webp: Davide Armanti / Pexels, Photo 29917912
+Pexels license: https://www.pexels.com/license/
+AI images are fictional illustrations, not actual business people, premises, products or work.
+Original generated files preserved. WebP encoding only; no new factual claims.
