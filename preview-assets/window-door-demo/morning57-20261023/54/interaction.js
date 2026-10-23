@@ -1,0 +1,1 @@
+const header=document.querySelector(".header");function updateHeader(){header.classList.toggle("scrolled",window.scrollY>40)}window.addEventListener("scroll",updateHeader,{passive:true});updateHeader();document.querySelectorAll(".mobile-nav nav a").forEach(a=>a.addEventListener("click",()=>document.querySelector(".mobile-nav").removeAttribute("open")));
